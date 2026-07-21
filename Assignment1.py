@@ -11,9 +11,6 @@ Covers the Peer Review Rubric in ReadmeAssignment1.md:
 import time
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")  # headless backend, plots are saved to disk
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -33,6 +30,25 @@ pd.set_option("display.width", 120)
 
 PLOTS_DIR = Path("plots")
 PLOTS_DIR.mkdir(exist_ok=True)
+
+
+def save_and_show(path):
+    """Save the current figure to disk AND force it to render in the notebook.
+
+    plt.show() alone can silently no-op depending on the active matplotlib
+    backend (e.g. when a script is run with `!python file.py` instead of
+    directly in a notebook cell). Explicitly embedding the saved PNG via
+    IPython.display guarantees the image appears in Kaggle/Jupyter output.
+    """
+    plt.savefig(path, dpi=100)
+    plt.show()
+    try:
+        from IPython.display import Image, display
+
+        display(Image(filename=str(path)))
+    except ImportError:
+        pass
+    plt.close()
 
 TARGET = "price"
 STOPS_ORDER = {"zero": 0, "one": 1, "two_or_more": 2}
@@ -134,8 +150,7 @@ sns.histplot(train[TARGET], bins=50, kde=True)
 plt.title("Distribution of Ticket Price")
 plt.xlabel("Price")
 plt.tight_layout()
-plt.savefig(PLOTS_DIR / "1_price_distribution.png", dpi=100)
-plt.close()
+save_and_show(PLOTS_DIR / "1_price_distribution.png")
 print(
     "[1] Price distribution is right-skewed with a long tail of expensive "
     "fares -> motivates using non-linear/tree-based models over plain "
@@ -146,8 +161,7 @@ plt.figure(figsize=(7, 5))
 sns.boxplot(data=train, x="class", y=TARGET)
 plt.title("Price by Seat Class")
 plt.tight_layout()
-plt.savefig(PLOTS_DIR / "2_price_by_class.png", dpi=100)
-plt.close()
+save_and_show(PLOTS_DIR / "2_price_by_class.png")
 print(
     "[2] Business class tickets are priced several times higher than "
     "Economy and show far wider spread -> 'class' is a strong predictor."
@@ -157,8 +171,7 @@ plt.figure(figsize=(7, 5))
 sns.boxplot(data=train, x="stops", y=TARGET, order=["zero", "one", "two_or_more"])
 plt.title("Price by Number of Stops")
 plt.tight_layout()
-plt.savefig(PLOTS_DIR / "3_price_by_stops.png", dpi=100)
-plt.close()
+save_and_show(PLOTS_DIR / "3_price_by_stops.png")
 print(
     "[3] Non-stop flights tend to be cheaper than flights with one or more "
     "stops, though the gap is smaller than the effect of 'class'."
@@ -169,8 +182,7 @@ sample = train.sample(min(5000, len(train)), random_state=42)
 sns.scatterplot(data=sample, x="days_left", y=TARGET, alpha=0.3, s=10)
 plt.title("Price vs Days Left Before Departure")
 plt.tight_layout()
-plt.savefig(PLOTS_DIR / "4_price_vs_days_left.png", dpi=100)
-plt.close()
+save_and_show(PLOTS_DIR / "4_price_vs_days_left.png")
 print(
     "[4] Prices spike sharply for last-minute bookings (~1-2 days before "
     "departure) and flatten out for tickets booked further in advance."
@@ -180,8 +192,7 @@ plt.figure(figsize=(6, 5))
 sns.heatmap(train[["duration", "days_left", "price"]].corr(), annot=True, cmap="coolwarm", vmin=-1, vmax=1)
 plt.title("Correlation Between Numeric Features")
 plt.tight_layout()
-plt.savefig(PLOTS_DIR / "5_correlation_heatmap.png", dpi=100)
-plt.close()
+save_and_show(PLOTS_DIR / "5_correlation_heatmap.png")
 print(
     "[5] 'days_left' has a mild negative correlation with price and "
     "'duration' a weak positive one -> numeric features alone explain "
@@ -213,6 +224,9 @@ NUMERIC_COLS = ["duration", "days_left", "stops_ord"]
 CATEGORICAL_COLS = ["airline", "source", "departure", "arrival", "destination", "class"]
 # "flight" holds ~870 near-unique codes; airline/route/class already capture
 # its useful signal, so it is dropped to avoid an explosion of dummy columns.
+# A combined "source_destination" route feature was tested too, but it hurt
+# KNN (extra one-hot dimensions worsen distance-based models) and gave no
+# measurable R2 gain for the tree ensembles, so it was left out.
 
 preprocessor = ColumnTransformer(
     transformers=[
@@ -263,7 +277,7 @@ models = {
     "Lasso": Lasso(random_state=42, max_iter=5000),
     "KNeighbors": KNeighborsRegressor(n_neighbors=7),
     "DecisionTree": DecisionTreeRegressor(random_state=42),
-    "RandomForest": RandomForestRegressor(n_estimators=150, random_state=42, n_jobs=-1),
+    "RandomForest": RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1),
     "HistGradientBoosting": HistGradientBoostingRegressor(random_state=42),
 }
 
@@ -302,10 +316,11 @@ tuning_configs = {
     "HistGradientBoosting": (
         HistGradientBoostingRegressor(random_state=42),
         {
-            "regressor__max_iter": [100, 150, 200],
-            "regressor__max_depth": [None, 6, 10],
-            "regressor__learning_rate": [0.03, 0.05, 0.1, 0.2],
+            "regressor__max_iter": [150, 200, 300, 400],
+            "regressor__max_depth": [None, 6, 10, 15],
+            "regressor__learning_rate": [0.03, 0.05, 0.1, 0.15, 0.2],
             "regressor__l2_regularization": [0.0, 0.1, 1.0],
+            "regressor__max_leaf_nodes": [15, 31, 63, 127],
         },
     ),
 }
@@ -317,7 +332,7 @@ for name, (estimator, param_grid) in tuning_configs.items():
     search = RandomizedSearchCV(
         pipe,
         param_distributions=param_grid,
-        n_iter=6,
+        n_iter=8,
         cv=3,
         scoring="r2",
         random_state=42,
@@ -350,25 +365,59 @@ comparison.sort_values().plot(kind="barh", color="steelblue")
 plt.xlabel("Validation R2 score")
 plt.title("Model Performance Comparison")
 plt.tight_layout()
-plt.savefig(PLOTS_DIR / "6_model_comparison.png", dpi=100)
-plt.close()
+save_and_show(PLOTS_DIR / "6_model_comparison.png")
 print("\nSaved model comparison chart to plots/6_model_comparison.png")
 
 best_name = comparison.index[0]
-print(f"\nBest model: {best_name} (validation R2 = {comparison.iloc[0]:.4f})")
+print(f"\nBest single model: {best_name} (validation R2 = {comparison.iloc[0]:.4f})")
 
 # =====================================================================
-# Final submission using the best-performing model, refit on all data
+# Bonus: blend the top 2 models with a tuned mixing weight to try to
+# beat the best single model. Different model families make different
+# errors, so a weighted average can reduce variance below either model
+# alone - but only if the mixing weight is chosen carefully, since an
+# equal-weight blend with a clearly weaker model can drag scores down.
 # =====================================================================
+print("\n" + "=" * 70)
+print("BONUS: BLENDING TOP 2 MODELS (weight search)")
+print("=" * 70)
+
 all_pipelines = {**fitted_pipelines, **tuned_pipelines}
-best_pipeline = all_pipelines[best_name]
-best_pipeline.fit(X, y)
-test_pred = best_pipeline.predict(X_test)
+name_a, name_b = comparison.index[0], comparison.index[1]
+pred_a = all_pipelines[name_a].predict(X_val)
+pred_b = all_pipelines[name_b].predict(X_val)
+
+alphas = np.linspace(0, 1, 21)  # weight on the best model (name_a)
+blend_r2 = [r2_score(y_val, alpha * pred_a + (1 - alpha) * pred_b) for alpha in alphas]
+best_alpha = alphas[int(np.argmax(blend_r2))]
+blend_score = max(blend_r2)
+print(f"Best blend: {best_alpha:.2f}*{name_a} + {1 - best_alpha:.2f}*{name_b} -> R2 = {blend_score:.4f}")
+
+if blend_score > comparison.iloc[0]:
+    print(f"Blend beats the best single model ({comparison.iloc[0]:.4f}) -> using the blend for submission.")
+    final_name = f"Blend({best_alpha:.2f}*{name_a}+{1 - best_alpha:.2f}*{name_b})"
+    use_blend = True
+else:
+    print(f"Best single model ({best_name}) still wins -> using it for submission.")
+    final_name = best_name
+    use_blend = False
+
+# =====================================================================
+# Final submission using the best-performing approach, refit on all data
+# =====================================================================
+if use_blend:
+    test_pred_a = all_pipelines[name_a].fit(X, y).predict(X_test)
+    test_pred_b = all_pipelines[name_b].fit(X, y).predict(X_test)
+    test_pred = best_alpha * test_pred_a + (1 - best_alpha) * test_pred_b
+else:
+    best_pipeline = all_pipelines[best_name]
+    best_pipeline.fit(X, y)
+    test_pred = best_pipeline.predict(X_test)
 
 submission = pd.DataFrame({"id": test["id"], "price": test_pred})
 submission.to_csv("submission.csv", index=False)
 
-print(f"\nSubmission saved with {len(submission)} rows using {best_name}.")
+print(f"\nSubmission saved with {len(submission)} rows using {final_name}.")
 print(
     f"Predicted price stats -> min: {test_pred.min():.2f}, "
     f"max: {test_pred.max():.2f}, mean: {test_pred.mean():.2f}"
